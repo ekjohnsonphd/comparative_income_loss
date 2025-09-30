@@ -1,10 +1,17 @@
-###############################################################################
-### Calculate comorbidities
-### Version: 1.0
-### Date: 14-12-2020
-### Author: Nicolai Simonsen
-###############################################################################
-# Packages
+# ==============================================================================
+# Comorbidity Index Calculation (Charlson & Elixhauser)
+# ==============================================================================
+# Calculates monthly Charlson and Elixhauser van Walraven comorbidity indices
+# from ICD-10 diagnosis codes using 5-year lookback periods.
+# 
+# Methods:
+# - Charlson: Quan (2005) ICD-10 codes, Quan (2011) weights
+# - Elixhauser: Quan (2005) codes, van Walraven (2009) weights
+# - Parallel processing by year-month combinations
+# 
+# Author: Nicolai Simonsen | Version: 1.0 | Date: 14-12-2020
+# ==============================================================================
+# Load required packages for data processing and parallel computing
 library(data.table)
 library(fst)
 library(magrittr)
@@ -14,51 +21,39 @@ library(parallel)
 library(arrow)
 
 start_time <- Sys.time()
-# Description ----
-# Calculates Charlson comorbidity index and the Elixhauser van Walraven index based on ICD-10 diagnosis codes on a monthly basis
-# == Charlson ===
-# The ICD-10 codes used for Charlson are defined in Quan (2005) 'Coding Algorithms for Defining Comorbidities in ICD-9-CM and ICD-10 Administrative data'
-# The weights used for Charlson are either the original from Charlson (1984) or the updated weights from Quan (2011)
-# == Elixhauser ==
-# The ICD-10 codes used for the Elixhauser comorbidities are defined in Quan (2005) 'Coding Algorithms for Defining Comorbidities in ICD-9-CM and ICD-10 Administrative data'
-# The weights used for Elixhauser van Walraven are defined in van Walraven (2009) 'A modification of the Elixhauser comorbidity measures into a point system for hospital death using administrative data'
 
-# The script relies on LPR data to calculate the index
+# ------------------------------------------------------------------------------
+# CONFIGURATION PARAMETERS
+# ------------------------------------------------------------------------------
 
-# Setup section ----
-# LPR data location
-# data_path <- "E:/ProjektDB/STFSDU/Workdata/707690/WPs/WP2/Project_differentieret_basishonorar/converted_data"
-# data_path <- "D:/data/Workdata/709656/Emily/rawdata/"
+# Data source and file paths
 data_path <- "D:/data/Rawdata/709656/Grunddata/"
 
-# Working directory
-# setwd("E:/ProjektDB/STFSDU/Workdata/707690/Users/NFS/comorbidities")
+# Analysis parameters
+start_year <- 2000    # First year for comorbidity calculation
+end_year <- 2018      # Last year for comorbidity calculation
+lookback <- 5         # Years of diagnosis history to include
 
-# Set the years for which you want to have the index
-start_year <- 2000
-end_year <- 2018
-
-# Lookback period - set the number of years the index should be based on
-lookback <- 5
-
-# Version - Choose either 'charlson1984' or 'quan2011  (see also line 12 above)
+# Scoring method: 'charlson1984' (original) or 'quan2011' (updated weights)
 version <- "quan2011"
 
-# Use hierachy scoring? TRUE/FALSE (if "TRUE": a person with a mild and a severe version of the same disease will only enter in the index with the severe version. if "FALSE" both versions will be factored in)
+# Hierarchy scoring: TRUE = severe conditions override mild versions
 use_hierachy <- TRUE
 
-# Return indicators for the individual comorbidities? TRUE/FALSE (if "TRUE" the output will contain an indicator variable for each disease in the index)
+# Return individual disease indicators alongside summary scores
 return_indicators <- TRUE
 
-# Stubnames - define the lpr filenames
-adm_stub <- "lpr_adm"
-diag_stub <- "lpr_diag"
-sksopr_stub <- "lpr_sksopr"
-sksube_stub <- "lpr_sksube"
-bes_stub <- "lpr_bes"
+# LPR data file naming patterns
+adm_stub <- "lpr_adm"     # Admissions
+diag_stub <- "lpr_diag"   # Diagnoses
+sksopr_stub <- "lpr_sksopr" # Surgery codes
+sksube_stub <- "lpr_sksube" # Treatment codes
+bes_stub <- "lpr_bes"     # Visits
 
-# Code section ----
-# Define weights----
+# ------------------------------------------------------------------------------
+# DEFINE COMORBIDITY WEIGHTS
+# ------------------------------------------------------------------------------
+# Set disease-specific weights based on chosen scoring system
 {
   if (version == "quan2011") {
     charlson_MI_weight <- 0
@@ -132,13 +127,10 @@ bes_stub <- "lpr_bes"
 }
 
 
-# Load data (all years)
-# t_adm <- read_fst(paste0(data_path, "/t_adm.fst"),
-#                   as.data.table = TRUE,
-#                   columns = c("k_recnum", "v_cpr", "D_INDDTO"))
-# setnames(t_adm, c("k_recnum", "v_cpr"), c("v_recnum", "pnr"))
-# t_adm[, D_INDDTO := as.IDate(D_INDDTO)]
-
+# ------------------------------------------------------------------------------
+# LOAD AND PREPARE LPR DATA
+# ------------------------------------------------------------------------------
+# Load admission data (1995-2018) with record numbers, person IDs, and dates
 adm_files <- Sys.glob(paste0(data_path, adm_stub,"*.parquet"))
 adm_years <- as.integer(gsub("lpr_adm(\\d{4})\\.parquet", "\\1", basename(adm_files)))
 adm_files <- adm_files[adm_years >= 1995 & adm_years <= 2018]
@@ -148,10 +140,7 @@ t_adm <- open_dataset(adm_files) %>%
   collect() %>%
   setDT()
 
-# Merge with t_diag
-# t_diag <- read_fst(paste0(data_path, "/t_diag.fst"),
-#                    as.data.table = TRUE,
-#                    columns = c("v_recnum", "C_DIAG", "C_DIAGTYPE"))
+# Load diagnosis data and merge with admissions
 diag_files <- Sys.glob(paste0(data_path, diag_stub,"*.parquet"))
 diag_years <- as.integer(gsub("lpr_diag(\\d{4})\\.parquet", "\\1", basename(diag_files)))
 diag_files <- diag_files[diag_years >= 1995 & diag_years <= 2018]
@@ -161,9 +150,9 @@ t_diag <- open_dataset(diag_files) %>%
   collect() %>%
   setDT()
 
+# Merge admissions with diagnoses and filter to primary/secondary diagnoses (A/B)
 master_data <- merge(t_adm, t_diag, by = "v_recnum")
-# Subset on A and B diagnosis
-master_data <- master_data[c_diagtype %in% c("A", "B")]
+master_data <- master_data[c_diagtype %in% c("A", "B")]  # Keep only primary/secondary diagnoses
 master_data[, c_diagtype := NULL]
 # # Subset on observations which are also present in either sksopr, sksube or bes
 #   check <- rbindlist(list(
@@ -192,10 +181,11 @@ write_fst(master_data, "data/temp/temp_comorb_data.fst", compress = 100)
 rm(t_adm, t_diag, check, master_data)
 gc()
 
-# Loop through months and years (in parallel)----
-# Initialize and setup clusters
+# ------------------------------------------------------------------------------
+# PARALLEL PROCESSING SETUP
+# ------------------------------------------------------------------------------
+# Setup cluster for parallel computation across year-month combinations
 myCluster <- parallel::makeCluster(5)
-# registerDoSNOW(myCluster)
 clusterCall(myCluster, function() {
   lapply(c("data.table", "magrittr", "fst", "lubridate"),
     require,
@@ -213,28 +203,34 @@ progress <- function() pb$tick()
 opts <- list(progress = progress)
 
 
-# Run parallel loop over months
+# ------------------------------------------------------------------------------
+# MAIN PROCESSING LOOP
+# ------------------------------------------------------------------------------
+# Process each year-month combination to calculate comorbidities with lookback
 months <- expand.grid("year" = start_year:end_year, "month" = 1:12) %>% as.data.table()
 months[, date := as.Date(paste0(year, "-", month, "-01"))]
 
 foreach(current_date = months$date, .options.snow = opts) %dopar% {
   message(paste0("Year: ", year(current_date), ". Month: ", month(current_date), ". Time: ", Sys.time()))
-  # Load data (only load on first run)
+  
+  # Load master diagnosis data
   if (!exists("master_data")) {
     master_data <- read_fst("data/temp/temp_comorb_data.fst", as.data.table = TRUE)
   }
 
+  # Filter to lookback period: 5 years before current date
   data <- copy(master_data[d_inddto %between% list(
     current_date - years(lookback),
     current_date - 1
   )])
 
-  # Create diag_3 and diag_4 variables
-  data[, diag_3 := substr(c_diag, 2, 4)] # Remember to drop initial 'D'
-  data[, diag_4 := substr(c_diag, 2, 5)] # Remember to drop initial 'D'
+  # Extract ICD-10 code segments (remove 'D' prefix)
+  data[, diag_3 := substr(c_diag, 2, 4)]  # 3-character codes
+  data[, diag_4 := substr(c_diag, 2, 5)]  # 4-character codes
 
-
-  ### Define Charlson comorbidities and apply chosen weight----
+  # ------------------------------------------------------------------------------
+  # CHARLSON COMORBIDITY INDEX CALCULATION
+  # ------------------------------------------------------------------------------
   {
     # Myocardial infraction (MI)
     data[diag_3 %in% c("I21", "I22"), charlson_MI := charlson_MI_weight]
@@ -301,7 +297,9 @@ foreach(current_date = months$date, .options.snow = opts) %dopar% {
     data[diag_3 %in% c(paste0("B", 20:22), "B24"), charlson_HIV := charlson_HIV_weight]
   }
 
-  ### Define Elixhauser comorbidities and apply van Walraven weights ----
+  # ------------------------------------------------------------------------------
+  # ELIXHAUSER VAN WALRAVEN INDEX CALCULATION  
+  # ------------------------------------------------------------------------------
   {
     # Congestive heart failure (CHF)
     data[diag_3 %in% c("I43", "I50"), elixhauser_CHF := walraven_CHF_weight]
@@ -457,8 +455,10 @@ foreach(current_date = months$date, .options.snow = opts) %dopar% {
     data[diag_4 %in% c("F204", "F313", "F314", "F315", "F341", "F412", "432"), elixhauser_Depression := walraven_Depression_weight]
   }
 
-  # Generate indicators and final score
-  # Extract comorbidity variable names
+  # ------------------------------------------------------------------------------
+  # GENERATE FINAL COMORBIDITY SCORES
+  # ------------------------------------------------------------------------------
+  # Extract all comorbidity variable names for processing
   cols <- grep("charlson_|elixhauser_", names(data), value = TRUE)
 
   # Extract data for comorbidity indicators (if requested)
@@ -534,9 +534,13 @@ foreach(current_date = months$date, .options.snow = opts) %dopar% {
   rm(data, comorbid_indicator, comorbid_temp)
   gc()
 }
-# Stop clusters
+# ------------------------------------------------------------------------------
+# CLEANUP AND TIMING
+# ------------------------------------------------------------------------------
+# Stop parallel processing and clean up temporary files
 stopCluster(myCluster)
-
 unlink("data/temp/temp_comorb_data.fst")
+
+# Report processing time
 end_time <- Sys.time()
-difftime(end_time, start_time, units = "secs")
+print(paste("Total processing time:", round(difftime(end_time, start_time, units = "mins"), 2), "minutes"))
